@@ -1,0 +1,193 @@
+-@ApplicationModule-->to assign a folder as module
+-ApplicationEventPublisher applicationEventPublisher;
+applicationEventPublisher.publishEvent(product1);-->to publish
+-@ApplicationModuleListener
+-@ApplicationModulePublisher
+
+!! so the objects that are getting published should also imported in other
+modules in order to get them using @ApplicationModuleListener.and they are
+imported from the module which they are published from.
+
+!!The package-info file and the class that will be published should be in same
+folder.
+option two is we will expose the folders containing the events .like
+
+com.leoulgetnet.springmodulith.productmodule
+│
+├── package-info.java               <-- Main module config
+│
+└── events                          <-- New sub-folder
+    ├── package-info.java           <-- Named interface config
+    └── ProductCreatedEvent.java    <-- Your event class
+
+package-info.java should look like
+    @org.springframework.modulith.NamedInterface("events") == @NamedInterface("events")
+    package com.leoulgetnet.springmodulith.productmodule.events;
+
+     so , If you want to keep classes in nested sub-packages rather than the root folder,
+     you must add a package-info.java with @NamedInterface to every nested package you
+     want other modules to see.
+     The name can be anything "events" or anything it does not matter.
+
+
+!!so in spring modulith there is no way to publish an event/object like kafka
+by assigning some id so listeners will selectively pick that message , rather
+if we publish one object and there are many listeners of same object they will
+all get activated even if they all have different purposes so the solution is
+for every condition we should use one class.so one class for one listener strategy
+works fine.
+one even publishing=one class
+!!we can not use one class for every event ,it should be one to one .
+
+-> for the method publishing events we should use @Transactional
+-> @EnableAsync = should be used in the main ApplicationService so allow async communication,
+running many events at the same time.
+Multiple Listeners: If you have 3 different modules listening to the same ProductCreatedEvent,
+Spring will execute all 3 listeners concurrently (at the same time) in separate threads.
+Multiple Events: If you publish 3 events in a row (like we did in our runner), the listeners for
+all 3 events will run concurrently in the background.
+
+Module Visibility rules
+->we can not use public for any of the java classes except the event classes that
+will be published.
+-> @Service
+  class ProductService {  // ❌ No 'public' keyword
+      private final ProductRepository repository;
+
+      // This is only visible within the product module
+  }
+->Events
+public record ProductCreatedEvent(Long id, String name) {} ->should be public
+
+
+!!so the problem is that if we don't make it public ,classes in another folder
+might not be considered as same package classes even if under same module.so
+in order to access one class like entity (under entity folder) in repository folder
+it should be public so the solution is to make them public but not use them under
+different modules.only use events.
+
+!! @ApplicationModule(
+       value = "order",
+       allowedDependencies = {"product"}  // ✅ Order can depend on Product
+   )
+
+   -->how should another module access other module data
+   still there must be importing service of another module .
+   but there is a solution.
+
+
+
+
+  ||||||||||||||||||||||||||||||||||
+  A class with methods annotated with @ApplicationModulePublisher CAN be shared across modules and
+  still passes the modular test!
+
+  // 📁 product/application/ProductService.java
+  package com.example.product;
+
+  @Service
+  class ProductService {
+      private final ProductRepository repository;
+      private final ApplicationEventPublisher publisher;
+
+      // ✅ PUBLIC - for queries
+      @ApplicationModulePublisher
+      public ProductInfo getProductInfo(Long id) {
+          Product product = repository.findById(id).orElseThrow();
+          return new ProductInfo(product.getId(), product.getName(), product.getPrice(), product.getStock());
+      }
+
+      // ✅ PUBLIC - for queries
+      @ApplicationModulePublisher
+      public boolean isInStock(Long id, int quantity) {
+          Product product = repository.findById(id).orElseThrow();
+          return product.getStock() >= quantity;
+      }
+
+      // ✅ PUBLIC - for commands + publishes event
+      @ApplicationModulePublisher
+      public Product createProduct(Product product) {
+          Product saved = repository.save(product);
+          publisher.publishEvent(new ProductEvents.ProductCreatedEvent(
+              saved.getId(),
+              saved.getName(),
+              saved.getPrice()
+          ));
+          return saved;
+      }
+
+      // ✅ PUBLIC - for commands + publishes event
+      @ApplicationModulePublisher
+      public void updateStock(Long id, int newStock) {
+          Product product = repository.findById(id).orElseThrow();
+          product.setStock(newStock);
+          repository.save(product);
+          publisher.publishEvent(new ProductEvents.ProductStockUpdatedEvent(id, newStock));
+      }
+  }
+
+  // 📁 product/api/ProductInfo.java
+  package com.example.product.api;
+  public record ProductInfo(Long id, String name, Double price, Integer stock) {}
+
+
+  ||||||||||||||||||||||||||||||||||||||||||||||
+  // 📁 order/application/OrderService.java
+  package com.example.order;
+
+  import com.example.product.ProductService;  // ✅ Import ProductService
+  import com.example.product.api.ProductInfo;  // ✅ Import DTO
+  import com.example.product.events.ProductEvents;  // ✅ Import Events
+
+  @Service
+  class OrderService {
+      private final ProductService productService;  // ✅ Inject
+      private final OrderRepository orderRepository;
+      private final ApplicationEventPublisher publisher;
+
+      // ✅ Command: Create order
+      @ApplicationModulePublisher
+      public Order createOrder(Long productId, int quantity) {
+          // ✅ Query: Get product info
+          ProductInfo product = productService.getProductInfo(productId);
+
+          // ✅ Query: Check stock
+          if (!productService.isInStock(productId, quantity)) {
+              throw new RuntimeException("Not enough stock");
+          }
+
+          // Create order
+          Order order = new Order();
+          order.setProductId(productId);
+          order.setProductName(product.name());
+          order.setQuantity(quantity);
+          order.setTotalPrice(product.price() * quantity);
+
+          Order saved = orderRepository.save(order);
+
+          // Publish event
+          publisher.publishEvent(new OrderEvents.OrderCreatedEvent(
+              saved.getId(),
+              productId,
+              quantity
+          ));
+
+          return saved;
+      }
+
+      // ✅ Event listener
+      @ApplicationModuleListener
+      void handleProductStockUpdated(ProductEvents.ProductStockUpdatedEvent event) {
+          // React to stock update
+          log.info("Product {} stock updated to {}", event.id(), event.newStock());
+      }
+  }
+
+
+  !!This way the modular test will pass , other way it will not pass as this is the
+  only intended way to pass data from one to another.
+  A class with methods annotated with @ApplicationModulePublisher CAN be shared across modules!
+!!The methods using methods with annotation @ApplicationModuleListener does not suppose to use
+the annotation to use the method unless they are intended to be shared too.
+
+Any class/event passed through @ApplicationModuleListener is ALLOWED to be imported!
